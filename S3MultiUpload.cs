@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using Amazon.S3;
 using Amazon.S3.Model;
@@ -38,8 +39,7 @@ public class MongoToS3Uploader
         var filter = Builders<BsonDocument>.Filter.Empty;
         var options = new FindOptions<BsonDocument, BsonDocument>
         {
-            BatchSize = 1000, // Adjust the batch size based on your scenario
-            NoCursorTimeout = true
+            BatchSize = 1000 // Assuming each batch should be treated as one part in the multipart upload
         };
 
         List<UploadPartResponse> uploadResponses = new List<UploadPartResponse>();
@@ -51,28 +51,30 @@ public class MongoToS3Uploader
             {
                 while (await cursor.MoveNextAsync())
                 {
-                    foreach (var doc in cursor.Current)
+                    var batch = cursor.Current;
+                    using var memoryStream = new MemoryStream();
+                    using (var writer = new StreamWriter(memoryStream, Encoding.UTF8, 1024, true))
                     {
-                        var json = doc.ToJson(new MongoDB.Bson.IO.JsonWriterSettings { OutputMode = MongoDB.Bson.IO.JsonOutputMode.Strict }) + Environment.NewLine;
-                        using var memoryStream = new MemoryStream();
-                        using (var writer = new StreamWriter(memoryStream))
+                        foreach (var doc in batch)
                         {
+                            var json = doc.ToJson(new MongoDB.Bson.IO.JsonWriterSettings { OutputMode = MongoDB.Bson.IO.JsonOutputMode.Strict }) + Environment.NewLine;
                             await writer.WriteAsync(json);
-                            await writer.FlushAsync();
-                            memoryStream.Position = 0; // Reset the position to the beginning of the stream
-
-                            var uploadRequest = new UploadPartRequest
-                            {
-                                BucketName = bucketName,
-                                Key = objectKey,
-                                UploadId = initiateResponse.UploadId,
-                                PartNumber = partNumber++,
-                                InputStream = memoryStream
-                            };
-
-                            var uploadResponse = await _s3Client.UploadPartAsync(uploadRequest);
-                            uploadResponses.Add(uploadResponse);
                         }
+
+                        await writer.FlushAsync();
+                        memoryStream.Position = 0;
+
+                        var uploadRequest = new UploadPartRequest
+                        {
+                            BucketName = bucketName,
+                            Key = objectKey,
+                            UploadId = initiateResponse.UploadId,
+                            PartNumber = partNumber++,
+                            InputStream = memoryStream
+                        };
+
+                        var uploadResponse = await _s3Client.UploadPartAsync(uploadRequest);
+                        uploadResponses.Add(uploadResponse);
                     }
                 }
             }
